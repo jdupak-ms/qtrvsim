@@ -227,28 +227,9 @@ else ()
     # Not available for WASM
     enable_testing()
 
-    if (NOT "${FORCE_ELFLIB_STATIC}")
-        find_package(LibElf)
-        if ("${LibElf_FOUND}")
-            include(CheckSymbolExists)
-            check_symbol_exists(EM_RISCV "gelf.h" LIBELF_HAS_RISCV)
-            if ("${LIBELF_HAS_RISCV}")
-                # Turn non-cmake library into a cmake target
-                add_library(libelf INTERFACE)
-                target_link_libraries(libelf INTERFACE ${LIBELF_LIBRARY})
-                target_include_directories(libelf INTERFACE ${LIBELF_INCLUDE_DIR})
-                message(STATUS "Using system libelf")
-            else ()
-                message(STATUS "System libelf does not support RISC-V")
-                set(LibElf_FOUND FALSE) # Force fallback
-            endif ()
-        endif ()
-    endif ()
-endif ()
-
-if ("${WASM}" OR "${FORCE_ELFLIB_STATIC}" OR NOT "${LibElf_FOUND}")
-    message(STATUS "Using local libelf fallback.")
-    add_subdirectory("external/libelf")
+    # Use libelfin for ELF file parsing
+    message(STATUS "Using libelfin for ELF parsing.")
+    add_subdirectory("external/libelfin/elf")
 endif ()
 
 # Detect Qt used qt version
