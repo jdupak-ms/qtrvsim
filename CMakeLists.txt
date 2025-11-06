@@ -35,8 +35,6 @@ include(cmake/GPL-3.0-or-later.cmake)
 
 set(DEV_MODE false CACHE BOOL "Enable developer options in this CMake, like packaging.\
     They should be ignored, when user just wants to build this project.")
-set(FORCE_ELFLIB_STATIC false CACHE BOOL
-        "Use included statically linked libelf even if system one is available.")
 set(SANITIZERS "address,undefined" CACHE STRING
         "Runtime sanitizers to use in debug builds.
     Column separated subset of {address, memory, undefined, thread} or none.
@@ -229,6 +227,19 @@ else ()
 
     # Use libelfin for ELF file parsing
     message(STATUS "Using libelfin for ELF parsing.")
+    
+    # Copy CMake build files for libelfin into the submodule at configure time
+    configure_file(
+        "${CMAKE_SOURCE_DIR}/external/libelfin-cmake/elf-CMakeLists.txt"
+        "${CMAKE_SOURCE_DIR}/external/libelfin/elf/CMakeLists.txt"
+        COPYONLY
+    )
+    configure_file(
+        "${CMAKE_SOURCE_DIR}/external/libelfin-cmake/elf-generate_to_string.sh"
+        "${CMAKE_SOURCE_DIR}/external/libelfin/elf/generate_to_string.sh"
+        COPYONLY
+    )
+    
     add_subdirectory("external/libelfin/elf")
 endif ()
 
