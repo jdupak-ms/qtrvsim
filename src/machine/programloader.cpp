@@ -20,7 +20,9 @@ LOG_CATEGORY("machine.ProgramLoader");
 
 // EM_RISCV is not defined in libelfin's data.hh, so we define it here
 // This is the official ELF machine type for RISC-V architecture
-#define EM_RISCV 243
+#ifndef EM_RISCV
+    #define EM_RISCV 243
+#endif
 
 using namespace machine;
 
@@ -84,12 +86,15 @@ ProgramLoader::ProgramLoader(const QString &file) : elf_file(file) {
                 "");
         }
     } catch (const elf::format_error &e) {
+        close(fd);
         throw SIMULATOR_EXCEPTION(
             Input, "ELF format error", e.what());
     } catch (const std::exception &e) {
+        close(fd);
         throw SIMULATOR_EXCEPTION(
             Input, "Error loading ELF file", e.what());
     }
+    // Note: fd is now owned by the mmap_loader and will be closed when the loader is destroyed
 }
 
 ProgramLoader::ProgramLoader(const char *file)
@@ -173,7 +178,8 @@ SymbolTable *ProgramLoader::get_symbol_table() {
         }
     } catch (const std::exception &e) {
         // If we can't read symbol table, just return empty one
-        WARN("Failed to read symbol table: %s", e.what());
+        WARN("Failed to read symbol table from '%s': %s", 
+             elf_file.fileName().toStdString().c_str(), e.what());
     }
 
     return p_st;
