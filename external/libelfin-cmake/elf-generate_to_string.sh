@@ -4,8 +4,12 @@
 SCRIPT_DIR="$1"
 OUTPUT_FILE="$2"
 
+# Create a secure temporary file
+TEMP_FILE=$(mktemp)
+trap "rm -f ${TEMP_FILE}" EXIT
+
 # Generate the temporary file from enum-print.py
-python3 "${SCRIPT_DIR}/enum-print.py" -u --hex --no-type --mask shf --mask pf -x loos -x hios -x loproc -x hiproc < "${SCRIPT_DIR}/data.hh" > /tmp/to_string_tmp.cc
+python3 "${SCRIPT_DIR}/enum-print.py" -u --hex --no-type --mask shf --mask pf -x loos -x hios -x loproc -x hiproc < "${SCRIPT_DIR}/data.hh" > "${TEMP_FILE}"
 
 # Create the final output file
 cat > "${OUTPUT_FILE}" << 'EOF'
@@ -19,10 +23,9 @@ ELFPP_BEGIN_NAMESPACE
 EOF
 
 # Append the generated content
-cat /tmp/to_string_tmp.cc >> "${OUTPUT_FILE}"
+cat "${TEMP_FILE}" >> "${OUTPUT_FILE}"
 
 # Add the closing namespace
 echo "ELFPP_END_NAMESPACE" >> "${OUTPUT_FILE}"
 
-# Clean up
-rm -f /tmp/to_string_tmp.cc
+# Cleanup is handled by the trap

@@ -18,6 +18,8 @@ LOG_CATEGORY("machine.ProgramLoader");
     #define O_BINARY 0
 #endif
 
+// EM_RISCV is not defined in libelfin's data.hh, so we define it here
+// This is the official ELF machine type for RISC-V architecture
 #define EM_RISCV 243
 
 using namespace machine;
