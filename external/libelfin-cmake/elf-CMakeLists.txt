@@ -1,0 +1,42 @@
+project(libelfin-elf)
+
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Generate to_string.cc from data.hh using enum-print.py
+add_custom_command(
+    OUTPUT to_string.cc
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/generate_to_string.sh ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/to_string.cc
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/data.hh ${CMAKE_CURRENT_SOURCE_DIR}/enum-print.py ${CMAKE_CURRENT_SOURCE_DIR}/generate_to_string.sh
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Generating to_string.cc"
+)
+
+set(LIBELFIN_SOURCES
+    elf.cc
+    mmap_loader.cc
+    ${CMAKE_CURRENT_BINARY_DIR}/to_string.cc
+)
+
+set(LIBELFIN_HEADERS
+    elf++.hh
+    data.hh
+    common.hh
+    to_hex.hh
+)
+
+add_library(libelfin STATIC ${LIBELFIN_SOURCES} ${LIBELFIN_HEADERS})
+
+# Suppress warnings for third-party code
+target_compile_options(libelfin PRIVATE -w)
+
+target_include_directories(libelfin PUBLIC 
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:include/libelfin/elf>
+)
+
+# Set output name to avoid lib prefix duplication
+set_target_properties(libelfin PROPERTIES 
+    OUTPUT_NAME "elfin"
+    LINKER_LANGUAGE CXX
+)

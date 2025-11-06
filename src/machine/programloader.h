@@ -7,7 +7,8 @@
 
 #include <QFile>
 #include <cstdint>
-#include <gelf.h>
+#include <elf++.hh>
+#include <memory>
 #include <qstring.h>
 #include <qvector.h>
 
@@ -38,17 +39,9 @@ public:
 
 private:
     QFile elf_file;
-    Elf *elf;
-    GElf_Ehdr hdr {}; // elf file header
-    size_t n_secs {}; // number of sections in elf program header
+    std::shared_ptr<elf::loader> loader;
+    elf::elf elf_handle;
     ArchitectureType architecture_type;
-
-private:
-    union {
-        Elf32_Phdr *arch32;
-        Elf64_Phdr *arch64;
-    } sections_headers{};
-    QVector<size_t> indexes_of_load_sections; // external index to sections_headers index
     Address executable_entry;
 };
 

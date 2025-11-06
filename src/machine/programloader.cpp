@@ -7,6 +7,9 @@
 #include <cerrno>
 #include <cstring>
 #include <exception>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 LOG_CATEGORY("machine.ProgramLoader");
 
@@ -15,15 +18,15 @@ LOG_CATEGORY("machine.ProgramLoader");
     #define O_BINARY 0
 #endif
 
+// EM_RISCV is not defined in libelfin's data.hh, so we define it here
+// This is the official ELF machine type for RISC-V architecture
+#ifndef EM_RISCV
+    #define EM_RISCV 243
+#endif
+
 using namespace machine;
 
 ProgramLoader::ProgramLoader(const QString &file) : elf_file(file) {
-    const GElf_Ehdr *elf_ehdr;
-    // Initialize elf library
-    if (elf_version(EV_CURRENT) == EV_NONE) {
-        throw SIMULATOR_EXCEPTION(
-            Input, "Elf library initialization failed", elf_errmsg(-1));
-    }
     // Open source file - option QIODevice::ExistingOnly cannot be used on Qt
     // <5.11
     if (!elf_file.open(QIODevice::ReadOnly | QIODevice::Unbuffered)) {
@@ -33,128 +36,108 @@ ProgramLoader::ProgramLoader(const QString &file) : elf_file(file) {
                 + QString(")"),
             std::strerror(errno));
     }
-    // Initialize elf
-    if (!(this->elf = elf_begin(elf_file.handle(), ELF_C_READ, nullptr))) {
+
+    // Create a file descriptor for the ELF file
+    int fd = dup(elf_file.handle());
+    if (fd < 0) {
         throw SIMULATOR_EXCEPTION(
-            Input, "Elf read begin failed", elf_errmsg(-1));
-    }
-    // Check elf kind
-    if (elf_kind(this->elf) != ELF_K_ELF) {
-        throw SIMULATOR_EXCEPTION(
-            Input, "Invalid input file elf format, plain elf file expected",
-            "");
+            Input, "Failed to duplicate file descriptor", std::strerror(errno));
     }
 
-    elf_ehdr = gelf_getehdr(this->elf, &this->hdr);
-    if (!elf_ehdr) {
-        throw SIMULATOR_EXCEPTION(
-            Input, "Getting elf file header failed", elf_errmsg(-1));
-    }
+    try {
+        // Create mmap loader and parse ELF file
+        loader = elf::create_mmap_loader(fd);
+        elf_handle = elf::elf(loader);
 
-    executable_entry = Address(elf_ehdr->e_entry);
-    // Check elf file format, executable expected, nothing else.
-    if (this->hdr.e_type != ET_EXEC) {
-        throw SIMULATOR_EXCEPTION(Input, "Invalid input file type", "");
-    }
-    // Check elf file architecture, of course only mips is supported.
-    // Note: This also checks that this is big endian as EM_MIPS is suppose to
-    // be: MIPS R3000 big-endian
-    if (this->hdr.e_machine != EM_RISCV) {
-        throw SIMULATOR_EXCEPTION(Input, "Invalid input file architecture", "");
-    }
-    // Check elf file class, only 32bit architecture is supported.
-    int elf_class;
-    if ((elf_class = gelf_getclass(this->elf)) == ELFCLASSNONE) {
-        throw SIMULATOR_EXCEPTION(
-            Input, "Getting elf class failed", elf_errmsg(-1));
-    }
-    // Get number of program sections in elf file
-    if (elf_getphdrnum(this->elf, &this->n_secs)) {
-        throw SIMULATOR_EXCEPTION(
-            Input, "Elf program sections count query failed", elf_errmsg(-1));
-    }
-
-    if (elf_class == ELFCLASS32) {
-        LOG("Loaded executable: 32bit");
-        architecture_type = ARCH32;
-        // Get program sections headers
-        if (!(sections_headers.arch32 = elf32_getphdr(elf))) {
-            throw SIMULATOR_EXCEPTION(Input, "Elf program sections get failed", elf_errmsg(-1));
-        }
-        // We want only LOAD sections so we create load_sections_indexes of those sections
-        for (unsigned i = 0; i < n_secs; i++) {
-            if (sections_headers.arch32[i].p_type != PT_LOAD) { continue; }
-            indexes_of_load_sections.push_back(i);
-        }
-    } else if (elf_class == ELFCLASS64) {
-        LOG("Loaded executable: 64bit");
-        architecture_type = ARCH64;
-        WARN("64bit simulation is not fully supported.");
-        // Get program sections headers
-        if (!(sections_headers.arch64 = elf64_getphdr(elf))) {
-            throw SIMULATOR_EXCEPTION(Input, "Elf program sections get failed", elf_errmsg(-1));
-        }
-        // We want only LOAD sections so we create load_sections_indexes of those sections
-        for (unsigned i = 0; i < this->n_secs; i++) {
-            if (sections_headers.arch64[i].p_type != PT_LOAD) { continue; }
-            this->indexes_of_load_sections.push_back(i);
+        if (!elf_handle.valid()) {
+            throw SIMULATOR_EXCEPTION(
+                Input, "Invalid input file elf format, plain elf file expected",
+                "");
         }
 
-    } else {
-        WARN("Unsupported elf class: %d", elf_class);
+        const auto &hdr = elf_handle.get_hdr();
+
+        executable_entry = Address(hdr.entry);
+
+        // Check elf file format, executable expected, nothing else.
+        if (hdr.type != elf::et::exec) {
+            throw SIMULATOR_EXCEPTION(Input, "Invalid input file type", "");
+        }
+
+        // Check elf file architecture, of course only RISC-V is supported.
+        if (hdr.machine != EM_RISCV) {
+            throw SIMULATOR_EXCEPTION(Input, "Invalid input file architecture", "");
+        }
+
+        // Check elf file class, determine if 32bit or 64bit architecture.
+        if (hdr.ei_class == elf::elfclass::_32) {
+            LOG("Loaded executable: 32bit");
+            architecture_type = ARCH32;
+        } else if (hdr.ei_class == elf::elfclass::_64) {
+            LOG("Loaded executable: 64bit");
+            architecture_type = ARCH64;
+            WARN("64bit simulation is not fully supported.");
+        } else {
+            WARN("Unsupported elf class: %d", (int)hdr.ei_class);
+            throw SIMULATOR_EXCEPTION(
+                Input,
+                "Unsupported architecture type."
+                "This simulator only supports 32bit and 64bit CPUs.",
+                "");
+        }
+    } catch (const elf::format_error &e) {
+        close(fd);
         throw SIMULATOR_EXCEPTION(
-            Input,
-            "Unsupported architecture type."
-            "This simulator only supports 32bit and 64bit CPUs.",
-            "");
+            Input, "ELF format error", e.what());
+    } catch (const std::exception &e) {
+        close(fd);
+        throw SIMULATOR_EXCEPTION(
+            Input, "Error loading ELF file", e.what());
     }
+    // Note: fd is now owned by the mmap_loader and will be closed when the loader is destroyed
 }
 
 ProgramLoader::ProgramLoader(const char *file)
     : ProgramLoader(QString::fromLocal8Bit(file)) {}
 
 ProgramLoader::~ProgramLoader() {
-    // Close elf
-    elf_end(this->elf);
     // Close file
     elf_file.close();
 }
 
 void ProgramLoader::to_memory(Memory *mem) {
     // Load program to memory (just dump it byte by byte)
-    if (architecture_type == ARCH32) {
-        for (size_t phdrs_i : this->indexes_of_load_sections) {
-            uint32_t base_address = this->sections_headers.arch32[phdrs_i].p_vaddr;
-            char *f = elf_rawfile(this->elf, nullptr);
-            for (unsigned y = 0; y < this->sections_headers.arch32[phdrs_i].p_filesz; y++) {
-                const auto buffer = (uint8_t)f[this->sections_headers.arch32[phdrs_i].p_offset + y];
-                memory_write_u8(mem, base_address + y, buffer);
-            }
+    for (const auto &seg : elf_handle.segments()) {
+        const auto &phdr = seg.get_hdr();
+        
+        // Only load PT_LOAD segments
+        if (phdr.type != elf::pt::load) {
+            continue;
         }
-    } else if (architecture_type == ARCH64) {
-        for (size_t phdrs_i : this->indexes_of_load_sections) {
-            uint32_t base_address = this->sections_headers.arch64[phdrs_i].p_vaddr;
-            char *f = elf_rawfile(this->elf, nullptr);
-            for (unsigned y = 0; y < this->sections_headers.arch64[phdrs_i].p_filesz; y++) {
-                const auto buffer = (uint8_t)f[this->sections_headers.arch64[phdrs_i].p_offset + y];
-                memory_write_u8(mem, base_address + y, buffer);
-            }
+
+        uint64_t base_address = phdr.vaddr;
+        const char *seg_data = (const char *)seg.data();
+        
+        for (uint64_t i = 0; i < phdr.filesz; i++) {
+            memory_write_u8(mem, base_address + i, (uint8_t)seg_data[i]);
         }
     }
 }
 
 Address ProgramLoader::end() {
-    uint32_t last = 0;
-    // Go trough all sections and found out last one
-    if (architecture_type == ARCH32) {
-        for (size_t i : this->indexes_of_load_sections) {
-            Elf32_Phdr *phdr = &(this->sections_headers.arch32[i]);
-            if ((phdr->p_vaddr + phdr->p_filesz) > last) { last = phdr->p_vaddr + phdr->p_filesz; }
+    uint64_t last = 0;
+    // Go through all segments and find out the last one
+    for (const auto &seg : elf_handle.segments()) {
+        const auto &phdr = seg.get_hdr();
+        
+        // Only consider PT_LOAD segments
+        if (phdr.type != elf::pt::load) {
+            continue;
         }
-    } else if (architecture_type == ARCH64) {
-        for (size_t i : this->indexes_of_load_sections) {
-            Elf64_Phdr *phdr = &(this->sections_headers.arch64[i]);
-            if ((phdr->p_vaddr + phdr->p_filesz) > last) { last = phdr->p_vaddr + phdr->p_filesz; }
+        
+        uint64_t seg_end = phdr.vaddr + phdr.filesz;
+        if (seg_end > last) {
+            last = seg_end;
         }
     }
     return Address(last + 0x10); // We add offset so we are sure that also
@@ -168,44 +151,46 @@ Address ProgramLoader::get_executable_entry() const {
 
 SymbolTable *ProgramLoader::get_symbol_table() {
     auto *p_st = new SymbolTable();
-    Elf_Scn *scn = nullptr;
-    GElf_Shdr shdr;
-    Elf_Data *data;
-    int count, ii;
 
-    elf_version(EV_CURRENT);
+    try {
+        for (const auto &sec : elf_handle.sections()) {
+            const auto &shdr = sec.get_hdr();
+            
+            // Look for symbol table section
+            if (shdr.type != elf::sht::symtab) {
+                continue;
+            }
 
-    while (true) {
-        if ((scn = elf_nextscn(this->elf, scn)) == nullptr) {
-            return p_st;
-        }
-        gelf_getshdr(scn, &shdr);
-        if (shdr.sh_type == SHT_SYMTAB) {
-            /* found a symbol table, go print it. */
+            // Found symbol table
+            auto symtab = sec.as_symtab();
+            for (const auto &symbol : symtab) {
+                const auto &sym_data = symbol.get_data();
+                p_st->add_symbol(
+                    symbol.get_name().c_str(),
+                    sym_data.value,
+                    sym_data.size,
+                    (unsigned char)(((unsigned char)sym_data.binding() << 4) | (unsigned char)sym_data.type()),
+                    (unsigned char)sym_data.other);
+            }
+            
+            // We found the symbol table, no need to continue
             break;
         }
-    }
-
-    data = elf_getdata(scn, nullptr);
-    count = shdr.sh_size / shdr.sh_entsize;
-
-    /* retrieve the symbol names */
-    for (ii = 0; ii < count; ++ii) {
-        GElf_Sym sym;
-        gelf_getsym(data, ii, &sym);
-        p_st->add_symbol(
-            elf_strptr(elf, shdr.sh_link, sym.st_name), sym.st_value,
-            sym.st_size, sym.st_info, sym.st_other);
+    } catch (const std::exception &e) {
+        // If we can't read symbol table, just return empty one
+        WARN("Failed to read symbol table from '%s': %s", 
+             elf_file.fileName().toStdString().c_str(), e.what());
     }
 
     return p_st;
 }
+
 Endian ProgramLoader::get_endian() const {
-    // Reading elf endian_id_byte according to the ELF specs.
-    unsigned char endian_id_byte = this->hdr.e_ident[EI_DATA];
-    if (endian_id_byte == ELFDATA2LSB) {
+    // Reading elf endian according to the ELF specs.
+    const auto &hdr = elf_handle.get_hdr();
+    if (hdr.ei_data == elf::elfdata::lsb) {
         return LITTLE;
-    } else if (endian_id_byte == ELFDATA2MSB) {
+    } else if (hdr.ei_data == elf::elfdata::msb) {
         return BIG;
     } else {
         throw SIMULATOR_EXCEPTION(
@@ -216,6 +201,7 @@ Endian ProgramLoader::get_endian() const {
             "");
     }
 }
+
 ArchitectureType ProgramLoader::get_architecture_type() const {
     return architecture_type;
 }
