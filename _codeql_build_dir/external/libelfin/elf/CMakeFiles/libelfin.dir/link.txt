@@ -1,0 +1,2 @@
+/usr/bin/ar qc libelfin.a CMakeFiles/libelfin.dir/elf.cc.o CMakeFiles/libelfin.dir/mmap_loader.cc.o CMakeFiles/libelfin.dir/to_string.cc.o
+/usr/bin/ranlib libelfin.a
