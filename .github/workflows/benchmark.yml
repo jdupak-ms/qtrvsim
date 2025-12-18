@@ -1,0 +1,202 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+    inputs:
+      regression_threshold:
+        description: 'Regression threshold percentage'
+        required: false
+        default: '10'
+        type: string
+
+# Ensure only one benchmark runs at a time per PR to avoid conflicts
+concurrency:
+  group: benchmark-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGRESSION_THRESHOLD: ${{ inputs.regression_threshold || '10' }}
+
+jobs:
+  benchmark:
+    name: Run Performance Benchmarks
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write  # Required to post PR comments
+      actions: read         # Required to download artifacts
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        run: git submodule update --recursive --init
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: benchmark-${{ runner.os }}
+
+      - name: Install Qt
+        run: sudo apt-get update && sudo apt-get install qtbase5-dev
+
+      - name: Create build directory
+        run: cmake -E make_directory ${{ github.workspace }}/build
+
+      - name: Configure CMake
+        working-directory: ${{ github.workspace }}/build
+        run: |
+          cmake ${{ github.workspace }} \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DSANITIZERS=none
+
+      - name: Build
+        working-directory: ${{ github.workspace }}/build
+        run: cmake --build . -j$(nproc)
+
+      - name: Download baseline (master branch)
+        if: github.event_name == 'pull_request'
+        uses: dawidd6/action-download-artifact@v6
+        continue-on-error: true
+        with:
+          workflow: benchmark.yml
+          branch: ${{ github.base_ref }}
+          name: benchmark-baseline
+          path: ${{ github.workspace }}/baseline
+          if_no_artifact_found: warn
+
+      - name: Run benchmarks
+        id: benchmark
+        working-directory: ${{ github.workspace }}
+        run: |
+          CLI_PATH="${{ github.workspace }}/build/target/qtrvsim_cli"
+          PROGRAMS_DIR="${{ github.workspace }}/benchmarks/programs"
+          OUTPUT_FILE="${{ github.workspace }}/benchmark_results.json"
+
+          BASELINE_ARG=""
+          if [ -f "${{ github.workspace }}/baseline/benchmark_results.json" ]; then
+            BASELINE_ARG="--baseline ${{ github.workspace }}/baseline/benchmark_results.json"
+          fi
+
+          python3 ${{ github.workspace }}/benchmarks/run_benchmarks.py \
+            --cli "$CLI_PATH" \
+            --programs "$PROGRAMS_DIR" \
+            --output "$OUTPUT_FILE" \
+            --threshold ${{ env.REGRESSION_THRESHOLD }} \
+            --verbose \
+            $BASELINE_ARG || echo "benchmark_status=regression" >> $GITHUB_OUTPUT
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-baseline
+          path: ${{ github.workspace }}/benchmark_results.json
+          retention-days: 90
+
+      - name: Comment on PR with benchmark results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            // Read benchmark results
+            const resultsPath = '${{ github.workspace }}/benchmark_results.json';
+            if (!fs.existsSync(resultsPath)) {
+              console.log('No benchmark results found');
+              return;
+            }
+
+            const results = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
+            const comparison = results.comparison;
+
+            let body = '## 📊 Benchmark Results\n\n';
+            body += `**Summary:** ${results.summary.passed}/${results.summary.total} benchmarks passed\n\n`;
+
+            if (comparison) {
+              if (comparison.regressions && comparison.regressions.length > 0) {
+                body += '### ⚠️ Performance Regressions\n\n';
+                body += '| Benchmark | Baseline | Current | Change |\n';
+                body += '|-----------|----------|---------|--------|\n';
+                for (const reg of comparison.regressions) {
+                  body += `| ${reg.name} | ${reg.baseline_cycles} | ${reg.current_cycles} | ${reg.diff_pct > 0 ? '+' : ''}${reg.diff_pct}% |\n`;
+                }
+                body += '\n';
+              }
+
+              if (comparison.improvements && comparison.improvements.length > 0) {
+                body += '### ✅ Performance Improvements\n\n';
+                body += '| Benchmark | Baseline | Current | Change |\n';
+                body += '|-----------|----------|---------|--------|\n';
+                for (const imp of comparison.improvements) {
+                  body += `| ${imp.name} | ${imp.baseline_cycles} | ${imp.current_cycles} | ${imp.diff_pct}% |\n`;
+                }
+                body += '\n';
+              }
+
+              if ((!comparison.regressions || comparison.regressions.length === 0) &&
+                  (!comparison.improvements || comparison.improvements.length === 0)) {
+                body += '✓ No significant performance changes detected.\n';
+              }
+            } else {
+              body += '> ℹ️ No baseline available for comparison. This is expected for the first run.\n';
+            }
+
+            body += '\n<details>\n<summary>Full Results</summary>\n\n';
+            body += '| Benchmark | Cycles | Stalls | Time (ms) |\n';
+            body += '|-----------|--------|--------|----------|\n';
+            for (const r of results.results.slice(0, 30)) {
+              if (r.success) {
+                body += `| ${r.name} | ${r.cycles} | ${r.stalls} | ${r.wall_time_ms.toFixed(1)} |\n`;
+              } else {
+                body += `| ${r.name} | ❌ Failed | - | - |\n`;
+              }
+            }
+            if (results.results.length > 30) {
+              body += `| ... | ${results.results.length - 30} more results | ... | ... |\n`;
+            }
+            body += '\n</details>\n';
+
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+
+            const existingComment = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('## 📊 Benchmark Results')
+            );
+
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
+
+      - name: Check for regressions
+        if: steps.benchmark.outputs.benchmark_status == 'regression'
+        run: |
+          echo "::warning::Performance regressions detected! Check the benchmark results."
+          # Uncomment the next line to fail the build on regressions
+          # exit 1
