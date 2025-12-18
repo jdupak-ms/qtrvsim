@@ -26,6 +26,11 @@ jobs:
     name: Run Performance Benchmarks
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: read
+      pull-requests: write  # Required to post PR comments
+      actions: read         # Required to download artifacts
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
