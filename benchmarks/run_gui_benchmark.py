@@ -64,17 +64,24 @@ def check_offscreen_support() -> bool:
             return True
 
     return True  # Assume it's available if we can't verify
+                 # Qt will provide a clear error message if not available
 
 
 def run_gui_startup_benchmark(
     gui_path: str,
-    timeout: int = 30
+    timeout: int = 30,
+    startup_wait: float = 2.0
 ) -> GuiBenchmarkResult:
     """
     Benchmark GUI startup time in headless mode.
 
     The GUI will be started with offscreen rendering and immediately closed.
     This measures the initialization overhead.
+
+    Args:
+        gui_path: Path to the GUI executable
+        timeout: Maximum time to wait for the process
+        startup_wait: Time to wait for startup (configurable for slow environments)
     """
     env = os.environ.copy()
     env["QT_QPA_PLATFORM"] = "offscreen"
@@ -94,8 +101,8 @@ def run_gui_startup_benchmark(
             stderr=subprocess.PIPE
         )
 
-        # Wait a short time for startup
-        time.sleep(2)
+        # Wait for startup (configurable for slow environments)
+        time.sleep(startup_wait)
 
         # Check if process is still running (good sign it started successfully)
         if proc.poll() is None:
@@ -137,12 +144,19 @@ def run_gui_startup_benchmark(
 def run_gui_with_program(
     gui_path: str,
     program_path: str,
-    timeout: int = 30
+    timeout: int = 30,
+    startup_wait: float = 3.0
 ) -> GuiBenchmarkResult:
     """
     Start GUI with a program loaded in headless mode.
 
     This tests the ability to load and potentially run programs.
+
+    Args:
+        gui_path: Path to the GUI executable
+        program_path: Path to the program to load
+        timeout: Maximum time to wait for the process
+        startup_wait: Time to wait for startup (configurable for slow environments)
     """
     env = os.environ.copy()
     env["QT_QPA_PLATFORM"] = "offscreen"
@@ -157,8 +171,8 @@ def run_gui_with_program(
             stderr=subprocess.PIPE
         )
 
-        # Wait for startup with program loaded
-        time.sleep(3)
+        # Wait for startup with program loaded (configurable for slow environments)
+        time.sleep(startup_wait)
 
         if proc.poll() is None:
             proc.terminate()
@@ -220,6 +234,12 @@ def main():
         help="Timeout per benchmark in seconds"
     )
     parser.add_argument(
+        "--startup-wait",
+        type=float,
+        default=2.0,
+        help="Time to wait for GUI startup in seconds (increase for slow environments)"
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print verbose output"
@@ -246,7 +266,7 @@ def main():
 
     # Test 1: Basic startup
     print("Testing GUI startup in offscreen mode...")
-    result = run_gui_startup_benchmark(args.gui, args.timeout)
+    result = run_gui_startup_benchmark(args.gui, args.timeout, args.startup_wait)
     results.append(result)
 
     if args.verbose:
@@ -258,7 +278,7 @@ def main():
     # Test 2: Load program (if provided)
     if args.program and os.path.isfile(args.program):
         print("Testing GUI with program loaded...")
-        result = run_gui_with_program(args.gui, args.program, args.timeout)
+        result = run_gui_with_program(args.gui, args.program, args.timeout, args.startup_wait + 1.0)
         results.append(result)
 
         if args.verbose:

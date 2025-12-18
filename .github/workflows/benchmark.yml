@@ -6,11 +6,20 @@ on:
   pull_request:
     branches: [master, main]
   workflow_dispatch:
+    inputs:
+      regression_threshold:
+        description: 'Regression threshold percentage'
+        required: false
+        default: '10'
+        type: string
 
 # Ensure only one benchmark runs at a time per PR to avoid conflicts
 concurrency:
   group: benchmark-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
+
+env:
+  REGRESSION_THRESHOLD: ${{ inputs.regression_threshold || '10' }}
 
 jobs:
   benchmark:
@@ -78,7 +87,7 @@ jobs:
             --cli "$CLI_PATH" \
             --programs "$PROGRAMS_DIR" \
             --output "$OUTPUT_FILE" \
-            --threshold 10 \
+            --threshold ${{ env.REGRESSION_THRESHOLD }} \
             --verbose \
             $BASELINE_ARG || echo "benchmark_status=regression" >> $GITHUB_OUTPUT
 

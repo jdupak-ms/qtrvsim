@@ -167,9 +167,15 @@ def run_benchmark(
         for line in result.stdout.split('\n'):
             line = line.strip()
             if line.startswith("cycles:"):
-                cycles = int(line.split(":")[1].strip())
+                try:
+                    cycles = int(line.split(":")[1].strip())
+                except (ValueError, IndexError):
+                    pass  # Keep default value of 0
             elif line.startswith("stalls:"):
-                stalls = int(line.split(":")[1].strip())
+                try:
+                    stalls = int(line.split(":")[1].strip())
+                except (ValueError, IndexError):
+                    pass  # Keep default value of 0
             elif ":" in line and "-cache" in line.split(":")[0]:
                 parts = line.split(":")
                 if len(parts) >= 2:
